@@ -1,0 +1,8 @@
+src/
+tests/
+test-runbooks/
+.test-sessions/
+jest.config.cjs
+tsconfig.json
+.eslintrc.json
+.github/
