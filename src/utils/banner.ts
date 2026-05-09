@@ -14,6 +14,7 @@ const ASCII = `
 const COMMANDS: [string, string][] = [
   ["mcp-kit init --dev", "Interactive setup for development MCPs (filesystem, git, playwright...)"],
   ["mcp-kit init --non-dev", "Interactive setup for shared/team MCPs (azure, confluence, slack...)"],
+  ["mcp-kit init --dry-run", "Simulate initialization without modifying configurations"],
   ["mcp-kit install", "Pre-download MCP packages (recommended in restricted networks)"],
   ["mcp-kit list", "Show configured MCPs and availability"],
   ["mcp-kit status", "Show MCP versions and config health summary"],

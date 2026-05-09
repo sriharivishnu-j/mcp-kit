@@ -32,6 +32,7 @@ mcp-kit init --non-dev # For non-developers
 | `mcp-kit install` | Pre-download all MCP packages |
 | `mcp-kit init --dev` | Configure developer MCPs |
 | `mcp-kit init --non-dev` | Configure non-developer MCPs |
+| `mcp-kit init --dry-run` | Simulate initialization without writing configurations |
 | `mcp-kit status` | Show configured MCPs |
 | `mcp-kit add <id>` | Add a single MCP |
 | `mcp-kit remove <id>` | Remove an MCP |
