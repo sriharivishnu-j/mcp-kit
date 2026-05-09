@@ -63,6 +63,20 @@ mcp-kit init --non-dev # For non-developers
 | `slack` | Slack MCP | productivity | all | Read Slack messages and send notifications |
 | `sonarqube` | SonarQube MCP | codeanalysis | dev | Code quality and security analysis |
 | `figma` | Figma MCP | design | all | Read, describe and convert Figma design files |
+| `notion` | Notion MCP | productivity | all | Read and write Notion pages, databases, and blocks |
+| `gmail` | Gmail MCP | productivity | all | Read emails, send messages, and manage your Gmail inbox |
+| `outlook` | Outlook MCP | productivity | all | Read emails and manage your Microsoft Outlook inbox |
+| `google-calendar` | Google Calendar MCP | productivity | all | Schedule awareness and calendar management directly in your IDE |
+| `teams` | Microsoft Teams MCP | productivity | all | Interact with Microsoft Teams channels and messages |
+| `jira` | Jira MCP | productivity | all | Manage issues, sprints, and projects in Jira |
+| `docker` | Docker MCP | devops | dev | Manage containers, images, compose — without leaving your IDE |
+| `kubernetes` | Kubernetes MCP | devops | dev | Logs, pods, and deployments for Kubernetes (k8s) |
+| `github` | GitHub MCP | versioncontrol | dev | Manage PRs, issues, Actions, and releases in GitHub |
+| `sentry` | Sentry MCP | codeanalysis | dev | Error tracking and production issue debugging with full context |
+| `datadog` | Datadog MCP | cloud | dev | Pull observability metrics, logs, and alerts into your workflow |
+| `mongodb` | MongoDB MCP | database | dev | Query and analyze MongoDB databases |
+| `redis` | Redis MCP | database | dev | Cache inspection, key browsing, and debugging for Redis |
+| `mysql` | MySQL MCP | database | dev | Read schemas and query MySQL databases securely |
 
 ## 🧠 .vscode Detection Logic
 
