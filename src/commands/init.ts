@@ -13,6 +13,7 @@ import type { McpDefinition, McpServerEntry, CredentialStorage, McpKitMeta, Prof
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import os from 'node:os';
+import { printBanner } from '../utils/banner.js';
 
 const _require = createRequire(import.meta.url);
 const pkg = _require('../../package.json') as { version: string };
@@ -101,6 +102,8 @@ export async function runInit(options: InitOptions): Promise<void> {
 
     const profileMode: ProfileMode = options.dev ? 'dev' : 'non-dev';
     const modeLabel = profileMode === 'dev' ? 'Developer' : 'Non-Developer';
+
+    printBanner();
 
     log.header(`\n mcp-kit - MCP Configuration Wizard\n Mode: ${modeLabel}`);
 

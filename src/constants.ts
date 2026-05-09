@@ -286,13 +286,13 @@ export const MCP_REGISTRY: McpDefinition[] = [
     name: "Git MCP",
     description: "Query git history, branches, commits and diffs",
     category: "versioncontrol",
-    npmPackage: "@modelcontextprotocol/server-git",
+    npmPackage: "@cyanheads/git-mcp-server",
     command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-git",'--repository','${GIT_REPO_PATH}'],
+    args: ["-y", "@cyanheads/git-mcp-server",'--repository','${GIT_REPO_PATH}'],
     devOnly: true,
     nonDevOnly: false,
     requiresNetwork: false,
-    docsUrl: "https://github.com/modelcontextprotocol/servers",
+    docsUrl: "https://github.com/cyanheads/git-mcp-server",
     envVars: [
       {
         key: "GIT_REPO_PATH",
@@ -491,13 +491,13 @@ export const MCP_REGISTRY: McpDefinition[] = [
   name: 'Figma MCP',
   description: 'Read, describe and convert Figma design files',
   category: 'design',
-  npmPackage: 'figma-scwebkit-mcp',
+  npmPackage: '@yhy2001/figma-mcp-server',
   command: 'npx',
-  args: ['-y', 'figma-scwebkit-mcp'],
+  args: ['-y', '@yhy2001/figma-mcp-server'],
   devOnly: false,
   nonDevOnly: false,
   requiresNetwork: true,
-  docsUrl: 'https://github.com/global-packages/figma-scwebkit-mcp',
+  docsUrl: 'https://github.com/1yhy/Figma-Context-MCP',
 
   envVars: [
     {

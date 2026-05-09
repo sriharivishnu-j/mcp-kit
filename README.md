@@ -100,14 +100,6 @@ All commands and prompts read dynamically from these constants!
 
 If anyone wants to add new MCPs, suggest improvements, fix bugs, or do something else, please feel free to raise a PR. Let's make this tool next level together!
 
-## 🚀 Publishing
-
-```bash
-npm login
-npm version patch
-npm run build
-npm publish --access public
-```
 
 ## 📄 License
 
