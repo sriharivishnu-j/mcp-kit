@@ -1,7 +1,7 @@
 import fs from "fs-extra";
 import os from "node:os";
 import path from "node:path";
-import { buildEnvRefValue, ensureGitignore, getCredential, storeCredential } from "../src/core/credentials";
+import { buildEnvRefValue, ensureGitignored, getCredential, storeCredential } from "../src/core/credentials";
 
 describe("credentials", () => {
   const tmpDir = path.join(os.tmpdir(), `mcp-kit-credentials-${Date.now()}`);
@@ -33,7 +33,7 @@ describe("credentials", () => {
   test("ensureGitignore adds .env if missing", async () => {
     const project = path.join(tmpDir, "project");
     await fs.mkdirp(project);
-    await ensureGitignore(project);
+    await ensureGitignored(project);
     const content = await fs.readFile(path.join(project, ".gitignore"), "utf8");
     expect(content.includes(".env")).toBe(true);
   });

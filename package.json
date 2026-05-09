@@ -93,6 +93,8 @@
     ],
 
     "moduleNameMapper": {
+      "^chalk$": "<rootDir>/test/mocks/chalk.ts",
+      "^boxen$": "<rootDir>/test/mocks/boxen.ts",
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
 
@@ -108,7 +110,7 @@
     "testEnvironment": "node",
 
     "testMatch": [
-      "**/src/__tests__/**/*.test.ts"
+      "**/test/**/*.test.ts"
     ]
   }
 }
