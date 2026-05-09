@@ -1,6 +1,6 @@
 {
   "name": "@global-packages/mcp-kit",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Universal MCP Configuration CLI - auto-detect, configure and manage MCP servers across Azure, Confluence, MSSQL, Playwright and more. Works on Windows, macOS and Linux.",
   "type": "module",
 
