@@ -1,159 +1,202 @@
-import fs from "fs-extra";
-import { MCP_KIT_META_PATH } from "../constants";
-import { getCredential } from "../core/credentials";
-import { detectVsCodePath } from "../core/detector";
-import { getMcpById } from "../core/registry";
-import { readMcpJson } from "../core/writer";
-import { checkNetworkReachability, checkNpmPackageExists } from "../core/validator";
-import { CredentialStorage, DoctorResult } from "../types";
-import { log } from "../utils/logger";
+import fs from 'node:fs/promises';
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson } from '../core/writer.js';
+import { getMcpById } from '../core/registry.js';
+import { getCredential, getEnvFilePath } from '../core/credentials.js';
+import { checkNetworkReachability, checkNpmPackageExists } from '../core/validator.js';
+import { log } from '../utils/logger.js';
+import { safeReadJSON } from '../utils/fs.js';
+import { MCP_KIT_META_PATH } from '../constants.js';
+import type { McpKitMeta, DoctorResult, CredentialStorage } from '../types.js';
 
-export async function runDoctor(): Promise<void> {
+//
+// mcp-kit doctor
+//
+
+interface DoctorOptions {
+  json?: boolean;
+}
+
+export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
   try {
-    log.header("🩺 Running diagnostics...");
-    const detected = await detectVsCodePath();
+    if (!options.json) log.header('mcp-kit - Diagnostics');
 
-    if (!(await fs.pathExists(detected.vscodeFolderPath))) {
-      log.warn("No .vscode folder found");
+    const vscodePaths = await detectVsCodePath();
+
+    if (vscodePaths.source === 'created') {
+      log.warn('No .vscode folder found - created a new one at: ' + vscodePaths.vscodeFolderPath);
     }
 
     let config;
     try {
-      config = await readMcpJson(detected.mcpJsonPath);
-    } catch {
-      log.error("mcp.json is missing or malformed");
+      config = await readMcpJson(vscodePaths.mcpJsonPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error('mcp.json is missing or malformed: ' + message);
+      log.step('Run "mcp-kit init dev" or "mcp-kit init non-dev" to create it.');
       process.exit(1);
+    }
+
+    const serverIds = Object.keys(config.servers);
+
+    if (serverIds.length === 0) {
+      log.warn('mcp.json exists but has no configured servers.');
+      log.info('Run "mcp-kit init" to configure MCPs.');
       return;
     }
 
-    if (Object.keys(config.servers).length === 0) {
-      log.error("mcp.json is missing or malformed");
-      process.exit(1);
-    }
+    const meta = await safeReadJSON<McpKitMeta>(MCP_KIT_META_PATH);
+    const credStorage: CredentialStorage = meta?.credentialStorage ?? 'keychain';
+    const envFilePath = getEnvFilePath(vscodePaths.vscodeFolderPath);
 
-    const meta = (await fs.pathExists(MCP_KIT_META_PATH)) ? await fs.readJSON(MCP_KIT_META_PATH) : {};
-    const storage = (meta.credentialStorage || "keychain") as CredentialStorage;
+    log.step(`Checking ${serverIds.length} configured MCP(s) in parallel...\n`);
 
-    const results = await Promise.all(
-      Object.keys(config.servers).map(async (id): Promise<DoctorResult> => {
-        const mcp = getMcpById(id);
+    // Run all checks in parallel
+    const doctorResults: DoctorResult[] = await Promise.all(
+      serverIds.map(async (id): Promise<DoctorResult> => {
+        const def = getMcpById(id);
+        const entry = config.servers[id];
         const issues: string[] = [];
         const suggestions: string[] = [];
+
+        // Check 1 - Credentials
         let credentialsPresent = true;
-        let packageInstallable = true;
+        if (def) {
+          for (const envVar of def.envVars) {
+            if (!envVar.secret) continue;
+            // Check if it's embedded in args (inline)
+            const inArgs = def.args.some(a => a.includes(`\${${envVar.key}}`));
+            if (inArgs) continue;
+            let found = false;
+            if (credStorage === 'keychain' || credStorage === 'dotenv') {
+              const val = await getCredential(envVar.key, credStorage, envFilePath);
+              found = !!val;
+            } else if (credStorage === 'inline') {
+              const envVal = entry?.env?.[envVar.key];
+              found = !!envVal && envVal !== '' && !envVal.startsWith('$(env:');
+            }
+            if (!found && envVar.required) {
+              credentialsPresent = false;
+              issues.push(`Missing credential: ${envVar.label} (${envVar.key})`);
+              suggestions.push(`Run "mcp-kit add ${id}" to reconfigure credentials`);
+            }
+          }
+        }
+
+        // Check 2 - Network reachability
         let networkReachable: boolean | undefined;
-
-        if (!mcp) {
-          issues.push("MCP not found in registry");
-          suggestions.push("Run `mcp-kit list --available` and re-add this MCP");
-          return {
-            mcpId: id,
-            mcpName: id,
-            configured: true,
-            credentialsPresent: false,
-            packageInstallable: false,
-            issues,
-            suggestions,
-            status: "error"
-          };
-        }
-
-        for (const envVar of mcp.envVars.filter((envItem) => envItem.secret)) {
-          const value = await getCredential(envVar.key, storage);
-          if (!value) {
-            credentialsPresent = false;
-            issues.push(`Missing credential: ${envVar.label}`);
-            suggestions.push(`Run \`mcp-kit add ${id}\` to reconfigure`);
-          }
-        }
-
-        if (mcp.requiresNetwork && mcp.healthCheckUrl) {
-          networkReachable = await checkNetworkReachability(mcp.healthCheckUrl);
+        if (def?.requiresNetwork && def.healthCheckUrl) {
+          networkReachable = await checkNetworkReachability(def.healthCheckUrl);
           if (!networkReachable) {
-            issues.push(`Cannot reach ${mcp.healthCheckUrl}`);
-            suggestions.push("Check your VPN / firewall settings");
+            issues.push(`Cannot reach ${def.healthCheckUrl}`);
+            suggestions.push('Check your VPN / firewall settings and network connection');
           }
         }
 
-        packageInstallable = await checkNpmPackageExists(mcp.npmPackage);
-        if (!packageInstallable) {
-          issues.push(`Package ${mcp.npmPackage} not found on npm registry`);
-          suggestions.push("Check npm registry or use offline cache");
+        // Check 3 - npm package installable
+        let packageInstallable = true;
+        if (def?.npmPackage) {
+          packageInstallable = await checkNpmPackageExists(def.npmPackage);
+          if (!packageInstallable) {
+            issues.push(`Package ${def.npmPackage} not found on npm registry`);
+            suggestions.push('Check npm registry availability or use offline cache via "mcp-kit install"');
+          }
         }
 
+        // Check 4 - mcp.json writable
         try {
-          await fs.access(detected.mcpJsonPath, fs.constants.W_OK);
+          await fs.access(vscodePaths.mcpJsonPath, fs.constants.W_OK);
         } catch {
-          issues.push("mcp.json is not writable");
-          suggestions.push(`Check file permissions: chmod 644 ${detected.mcpJsonPath}`);
+          issues.push(`mcp.json is not writable: ${vscodePaths.mcpJsonPath}`);
+          suggestions.push(`Fix file permissions: chmod 644 ${vscodePaths.mcpJsonPath}`);
         }
 
-        const configured = config.servers[id];
-        if (configured.command !== mcp.command || !configured.args.some((arg) => arg.includes(mcp.npmPackage))) {
-          issues.push("Args may be stale — run `mcp-kit update`");
-          suggestions.push("Run `mcp-kit update` to refresh command arguments");
+        // Check 5 - Args validity
+        if (def && entry) {
+          const firstPackageArg = entry.args.find(
+            a => a.startsWith('@') || (a.includes('/') && !a.startsWith('-'))
+          );
+          if (firstPackageArg && !firstPackageArg.includes('@latest')) {
+            issues.push('Command args may be stale or mismatched');
+            suggestions.push('Run "mcp-kit update" to refresh to @latest');
+          }
         }
 
-        const status: DoctorResult["status"] = issues.length === 0
-          ? "healthy"
-          : issues.some((issue) => issue.startsWith("Missing credential") || issue.includes("not writable") || issue.includes("not found"))
-            ? "error"
-            : "warning";
+        // Determine overall status
+        const hasErrors = issues.some(
+          i =>
+            i.includes('Missing credential') ||
+            i.includes('not found on npm') ||
+            i.includes('not writable')
+        );
+
+        const status = issues.length === 0 ? 'healthy' : hasErrors ? 'error' : 'warning';
 
         return {
           mcpId: id,
-          mcpName: mcp.name,
-          configured: true,
+          mcpName: def?.name ?? id,
+          configured: !!entry,
           credentialsPresent,
           networkReachable,
           packageInstallable,
           issues,
           suggestions,
-          status
+          status,
         };
       })
     );
 
-    let healthy = 0;
-    let warnings = 0;
-    let errors = 0;
+    // Print results
+    log.blank();
+    let healthyCount = 0;
+    let warningCount = 0;
+    let errorCount = 0;
 
-    for (const result of results) {
-      if (result.status === "healthy") {
-        healthy += 1;
-        console.log(`✅ ${result.mcpName} — Healthy`);
-      } else if (result.status === "warning") {
-        warnings += 1;
-        console.log(`⚠️ ${result.mcpName} — Warning: ${result.issues[0]}`);
+    if (options.json) {
+      console.log(JSON.stringify(doctorResults, null, 2));
+      const hasErrors = doctorResults.some(r => r.status === 'error');
+      if (hasErrors) process.exit(1);
+      return;
+    }
+
+    for (const result of doctorResults) {
+      if (result.status === 'healthy') {
+        log.success(`${result.mcpName} - Healthy`);
+        healthyCount++;
+      } else if (result.status === 'warning') {
+        log.warn(`${result.mcpName} - Warning`);
+        result.issues.forEach(issue => log.muted(`  • ${issue}`));
+        result.suggestions.forEach(sug => log.muted(`  → ${sug}`));
+        warningCount++;
       } else {
-        errors += 1;
-        console.log(`❌ ${result.mcpName} — Error: ${result.issues[0]}`);
-      }
-
-      if (result.suggestions[0]) {
-        console.log(`Fix: ${result.suggestions[0]}`);
+        log.error(`${result.mcpName} - Error`);
+        result.issues.forEach(issue => log.muted(`  • ${issue}`));
+        result.suggestions.forEach(sug => log.muted(`  → ${sug}`));
+        errorCount++;
       }
     }
 
-    console.log("\nSummary:");
-    console.log(`Healthy: ${healthy}`);
-    console.log(`Warnings: ${warnings}`);
-    console.log(`Errors: ${errors}`);
+    // Summary
+    log.blank();
+    log.info(
+      `Summary - Healthy: ${healthyCount}  Warnings: ${warningCount}  Errors: ${errorCount}`
+    );
 
-    if (errors > 0) {
-      log.info("Run `mcp-kit add <id>` to fix individual MCPs");
-      log.info("Run `mcp-kit reset` to start fresh");
+    if (errorCount > 0 || warningCount > 0) {
+      log.blank();
+      log.step('Run "mcp-kit add <id>" to fix individual MCPs');
+      log.step('Run "mcp-kit reset" to start fresh');
+    }
+
+    // Exit 1 if any errors
+    if (errorCount > 0) {
       process.exit(1);
     }
 
-    process.exit(0);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    log.error(`Doctor failed: ${message}`);
-    log.muted("Suggestion: validate your network and local file permissions.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
-    }
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`Doctor check failed: ${message}`);
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

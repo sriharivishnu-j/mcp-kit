@@ -1,102 +1,138 @@
-import fs from "fs-extra";
-import { MCP_KIT_META_PATH } from "../constants";
-import { detectVsCodePath } from "../core/detector";
-import { getLatestVersion, getMcpById } from "../core/registry";
-import { readMcpJson } from "../core/writer";
-import { CredentialStorage } from "../types";
-import { log, printTable } from "../utils/logger";
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson } from '../core/writer.js';
+import { getMcpById, getLatestVersion } from '../core/registry.js';
+import { log, printTable } from '../utils/logger.js';
+import { safeReadJSON } from '../utils/fs.js';
+import { MCP_KIT_META_PATH } from '../constants.js';
+import type { McpKitMeta } from '../types.js';
+import chalk from 'chalk';
+
+//
+// mcp-kit status
+//
 
 interface StatusOptions {
   json?: boolean;
 }
 
-function extractCurrentVersion(args: string[]): string {
-  const match = /@([\w.-]+)$/.exec(args.join(" "));
-  return match?.[1] || "latest";
-}
-
 export async function runStatus(options: StatusOptions = {}): Promise<void> {
   try {
-    const detected = await detectVsCodePath();
-    const config = await readMcpJson(detected.mcpJsonPath);
-    const meta = (await fs.pathExists(MCP_KIT_META_PATH))
-      ? await fs.readJSON(MCP_KIT_META_PATH)
-      : { credentialStorage: "keychain", lastUpdated: "never" };
+    const vscodePaths = await detectVsCodePath();
+    const config = await readMcpJson(vscodePaths.mcpJsonPath);
+    const meta = await safeReadJSON<McpKitMeta>(MCP_KIT_META_PATH);
+    const serverIds = Object.keys(config.servers);
 
-    const entries = Object.entries(config.servers);
-    const latestVersions = await Promise.all(
-      entries.map(async ([id]) => {
-        const mcp = getMcpById(id);
-        if (!mcp) {
-          return "unknown";
-        }
-        return getLatestVersion(mcp.npmPackage);
-      }),
-    );
-
-    const rows = entries.map(([id, server], index) => {
-      const mcp = getMcpById(id);
-      const current = extractCurrentVersion(server.args);
-      const latest = latestVersions[index];
-      const upToDate = current === "latest" || current === latest;
-      return [
-        mcp?.name || id,
-        mcp?.category || "unknown",
-        mcp?.npmPackage || "unknown",
-        current,
-        latest,
-        upToDate ? "Yes" : "No",
-        (meta.credentialStorage as CredentialStorage) || "keychain",
-      ];
-    });
-
-    if (options.json) {
-      const output = entries.map(([id, server], index) => {
-        const mcp = getMcpById(id);
-        return {
-          id,
-          name: mcp?.name ?? id,
-          category: mcp?.category ?? "unknown",
-          package: mcp?.npmPackage ?? "unknown",
-          command: server.command,
-          args: server.args,
-          version: extractCurrentVersion(server.args),
-          latest: latestVersions[index],
-          disabled: Boolean(server.disabled),
-          credentialStorage:
-            (meta.credentialStorage as CredentialStorage) || "keychain",
-        };
-      });
-      console.log(JSON.stringify(output, null, 2));
+    if (serverIds.length === 0) {
+      if (options.json) {
+        console.log(JSON.stringify({
+          configured: [],
+          source: vscodePaths.source,
+          mcpJsonPath: vscodePaths.mcpJsonPath,
+        }));
+        return;
+      }
+      log.warn('No MCP servers currently configured.');
+      log.info('Run "mcp-kit init --dev" or "mcp-kit init --non-dev" to get started.');
       return;
     }
 
-    printTable(
-      [
-        "ID",
-        "Name",
-        "MCP Name",
-        "Category",
-        "Package",
-        "Version",
-        "Latest",
-        "Up-to-date",
-        "Credential Storage",
-      ],
-      rows,
+    // Fetch latest versions in parallel
+    const latestVersions = await Promise.all(
+      serverIds.map(id => {
+        const def = getMcpById(id);
+        return def ? getLatestVersion(def.npmPackage) : Promise.resolve('n/a');
+      })
     );
 
-    log.info(`Config path: ${detected.mcpJsonPath}`);
-    log.info(`Last updated: ${meta.lastUpdated || "unknown"}`);
-    log.info("Run `mcp-kit doctor` to diagnose any issues");
-    process.exit(0);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    log.error(`Status failed: ${message}`);
-    log.muted("Suggestion: ensure mcp.json is valid and readable.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
+    if (options.json) {
+      const output = serverIds.map((id, i) => {
+        const def = getMcpById(id);
+        const entry = config.servers[id];
+        const latest = latestVersions[i] ?? 'n/a';
+        const versionInArgs = entry?.args
+          ?.map(a => {
+            const match = a.match(/@([^\s@]+)$/);
+            return match ? match[1] : null;
+          })
+          .find(Boolean) ?? 'latest';
+        const upToDate =
+          versionInArgs === 'latest' || versionInArgs === latest || latest === 'n/a';
+        return {
+          id,
+          name: def?.name ?? id,
+          category: def?.category ?? 'unknown',
+          package: def?.npmPackage ?? '',
+          version: versionInArgs,
+          latest,
+          upToDate,
+          credentialStorage: meta?.credentialStorage ?? 'unknown',
+          disabled: entry?.disabled ?? false,
+        };
+      });
+
+      console.log(JSON.stringify({
+        source: vscodePaths.source,
+        mcpJsonPath: vscodePaths.mcpJsonPath,
+        configured: output,
+      }, null, 2));
+      return;
     }
+
+    const sourceLabel =
+      vscodePaths.source === 'project' ? 'project .vscode' :
+      vscodePaths.source === 'global' ? 'VS Code global config' :
+      'created .vscode';
+
+    log.header('MCP Status');
+
+    const rows = serverIds.map((id, i) => {
+      const def = getMcpById(id);
+      const entry = config.servers[id];
+      const latest = latestVersions[i] ?? 'n/a';
+
+      // Try to extract version from args (e.g. "@azure/mcp@1.2.0")
+      const versionInArgs = entry?.args
+        ?.map(a => {
+          const match = a.match(/@([^\s@]+)$/);
+          return match ? match[1] : null;
+        })
+        .find(Boolean) ?? 'latest';
+
+      const upToDate =
+        versionInArgs === 'latest' || versionInArgs === latest || latest === 'n/a';
+      const disabled = entry?.disabled === true;
+
+      return [
+        disabled ? chalk.gray(id) : id,
+        def?.name ?? id,
+        def?.category ?? 'unknown',
+        def?.npmPackage ?? entry?.command ?? '',
+        versionInArgs,
+        latest,
+        disabled
+          ? chalk.gray('⏸ disabled')
+          : upToDate
+          ? chalk.green('✓')
+          : chalk.yellow('↑ update available'),
+        meta?.credentialStorage ?? 'unknown',
+      ];
+    });
+
+    printTable(
+      ['ID', 'Name', 'Category', 'Package', 'Version', 'Latest', 'Status', 'Cred Storage'],
+      rows
+    );
+
+    log.blank();
+    log.muted(`Config path: ${vscodePaths.mcpJsonPath} (${sourceLabel})`);
+    log.muted(`Last updated: ${meta?.lastUpdated ?? 'unknown'}`);
+    log.blank();
+    log.info('Run "mcp-kit doctor" to diagnose any issues.');
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`Status check failed: ${message}`);
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

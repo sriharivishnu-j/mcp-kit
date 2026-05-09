@@ -1,27 +1,43 @@
-import fs from "fs-extra";
-import path from "node:path";
-import { log } from "../utils/logger";
-import { validateMcpJson } from "./validator";
-import { McpJsonConfig, McpServerEntry } from "../types";
+import { safeReadJSON, safeWriteJSON } from '../utils/fs.js';
+import { log } from '../utils/logger.js';
+import type { McpJsonConfig, McpServerEntry } from '../types.js';
 
+//
+// mcp.json reader / writer
+//
+
+/**
+ * Read mcp.json from disk. Returns { servers: {} } if the file does not
+ * exist. Throws if the file exists but cannot be parsed.
+ */
 export async function readMcpJson(mcpJsonPath: string): Promise<McpJsonConfig> {
-  if (!(await fs.pathExists(mcpJsonPath))) {
+  const data = await safeReadJSON<McpJsonConfig>(mcpJsonPath);
+  if (!data) {
     return { servers: {} };
   }
-
-  const raw = await fs.readFile(mcpJsonPath, "utf8");
-  const parsed = JSON.parse(raw) as unknown;
-  return validateMcpJson(parsed);
+  if (typeof data !== 'object' || !('servers' in data)) {
+    throw new Error(
+      `mcp.json at ${mcpJsonPath} is malformed - missing "servers" key`
+    );
+  }
+  return data;
 }
 
-export async function writeMcpJson(mcpJsonPath: string, config: McpJsonConfig): Promise<void> {
-  await fs.mkdirp(path.dirname(mcpJsonPath));
-  const tmpPath = `${mcpJsonPath}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf8");
-  await fs.rename(tmpPath, mcpJsonPath);
+/**
+ * Write mcp.json to disk atomically (write to .tmp then rename).
+ * Logs the path on success.
+ */
+export async function writeMcpJson(
+  mcpJsonPath: string,
+  config: McpJsonConfig
+): Promise<void> {
+  await safeWriteJSON(mcpJsonPath, config);
   log.success(`Written: ${mcpJsonPath}`);
 }
 
+/**
+ * Add or overwrite a single MCP server entry in mcp.json.
+ */
 export async function addServerToMcpJson(
   mcpJsonPath: string,
   serverId: string,
@@ -32,19 +48,30 @@ export async function addServerToMcpJson(
   await writeMcpJson(mcpJsonPath, config);
 }
 
-export async function removeServerFromMcpJson(mcpJsonPath: string, serverId: string): Promise<void> {
+/**
+ * Remove a single MCP server entry from mcp.json.
+ */
+export async function removeServerFromMcpJson(
+  mcpJsonPath: string,
+  serverId: string
+): Promise<void> {
   const config = await readMcpJson(mcpJsonPath);
   delete config.servers[serverId];
   await writeMcpJson(mcpJsonPath, config);
 }
 
-export async function mergeMcpJson(mcpJsonPath: string, incoming: McpJsonConfig): Promise<void> {
+/**
+ * Merge an incoming McpJsonConfig into the existing one.
+ * Incoming servers win on key conflict.
+ */
+export async function mergeMcpJson(
+  mcpJsonPath: string,
+  incoming: McpJsonConfig
+): Promise<void> {
   const existing = await readMcpJson(mcpJsonPath);
-  const merged: McpJsonConfig = {
-    servers: {
-      ...existing.servers,
-      ...incoming.servers
-    }
-  };
-  await writeMcpJson(mcpJsonPath, merged);
+  existing.servers = { ...existing.servers, ...incoming.servers };
+  if (incoming.inputs) {
+    existing.inputs = [...(existing.inputs ?? []), ...incoming.inputs];
+  }
+  await writeMcpJson(mcpJsonPath, existing);
 }

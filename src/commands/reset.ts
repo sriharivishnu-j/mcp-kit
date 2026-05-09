@@ -1,63 +1,84 @@
-import chalk from "chalk";
-import fs from "fs-extra";
-import boxen from "boxen";
-import { MCP_KIT_META_PATH } from "../constants";
-import { deleteCredential } from "../core/credentials";
-import { detectVsCodePath } from "../core/detector";
-import { getMcpById } from "../core/registry";
-import { askConfirm } from "../prompts/shared-prompts";
-import { CredentialStorage } from "../types";
-import { log } from "../utils/logger";
+import chalk from 'chalk';
+import boxen from 'boxen';
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson } from '../core/writer.js';
+import { getMcpById } from '../core/registry.js';
+import { deleteCredential, getEnvFilePath } from '../core/credentials.js';
+import { askConfirm } from '../prompts/shared-prompts.js';
+import { log } from '../utils/logger.js';
+import { safeReadJSON, deleteFile, fileExists } from '../utils/fs.js';
+import { MCP_KIT_META_PATH } from '../constants.js';
+import type { McpKitMeta, CredentialStorage } from '../types.js';
+
+//
+// mcp-kit reset
+//
 
 export async function runReset(): Promise<void> {
   try {
+    // Warning box
     console.log(
-      boxen(chalk.red("⚠️ RESET: This will delete mcp.json and all stored credentials"), {
-        padding: 1,
-        borderColor: "red"
-      })
+      boxen(
+        chalk.red.bold('⚠ RESET WARNING\n') +
+          chalk.white(
+            'This will delete mcp.json and all stored credentials.\n' +
+              'This action CANNOT be undone.'
+          ),
+        { padding: 1, borderColor: 'red', borderStyle: 'round' }
+      )
     );
 
-    const sure = await askConfirm("Are you absolutely sure? This cannot be undone.");
-    if (!sure) {
-      log.info("Aborted. Nothing was changed.");
-      process.exit(0);
+    const confirmed = await askConfirm(
+      'Are you absolutely sure you want to reset everything?'
+    );
+    if (!confirmed) {
+      log.info('Aborted. Nothing was changed.');
+      return;
     }
 
-    const deleteCreds = await askConfirm("Also remove credentials from keychain/.env?");
-    const detected = await detectVsCodePath();
+    const deleteCreds = await askConfirm(
+      'Also remove stored credentials from keychain / env?'
+    );
 
-    if (await fs.pathExists(detected.mcpJsonPath)) {
-      await fs.remove(detected.mcpJsonPath);
-    }
+    const vscodePaths = await detectVsCodePath();
+    const meta = await safeReadJSON<McpKitMeta>(MCP_KIT_META_PATH);
+    const credStorage: CredentialStorage = meta?.credentialStorage ?? 'keychain';
+    const envFilePath = getEnvFilePath(vscodePaths.vscodeFolderPath);
 
-    if (deleteCreds && (await fs.pathExists(MCP_KIT_META_PATH))) {
-      const meta = await fs.readJSON(MCP_KIT_META_PATH);
-      const storage = (meta.credentialStorage || "keychain") as CredentialStorage;
-      for (const id of meta.installedMcps || []) {
-        const mcp = getMcpById(id);
-        if (!mcp) {
-          continue;
-        }
-        for (const envVar of mcp.envVars) {
-          await deleteCredential(envVar.key, storage);
+    // Delete credentials if requested
+    if (deleteCreds && meta?.installedMcps) {
+      for (const mcpId of meta.installedMcps) {
+        const def = getMcpById(mcpId);
+        if (!def) continue;
+        for (const envVar of def.envVars) {
+          if (envVar.secret) {
+            await deleteCredential(envVar.key, credStorage, envFilePath);
+          }
         }
       }
+      log.success('Stored credentials have been deleted.');
     }
 
-    if (await fs.pathExists(MCP_KIT_META_PATH)) {
-      await fs.remove(MCP_KIT_META_PATH);
+    // Delete mcp.json
+    if (await fileExists(vscodePaths.mcpJsonPath)) {
+      await deleteFile(vscodePaths.mcpJsonPath);
+      log.success(`Deleted: ${vscodePaths.mcpJsonPath}`);
     }
 
-    log.success("Reset complete. Run `mcp-kit init --dev` to start fresh.");
-    process.exit(0);
+    // Delete meta.json
+    if (await fileExists(MCP_KIT_META_PATH)) {
+      await deleteFile(MCP_KIT_META_PATH);
+      log.success('Deleted: ~/.mcp-kit/meta.json');
+    }
+
+    log.blank();
+    log.success('Reset complete.');
+    log.info('Run "mcp-kit init --dev" to start fresh.');
+
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const message = err instanceof Error ? err.message : String(err);
     log.error(`Reset failed: ${message}`);
-    log.muted("Suggestion: check file permissions and retry.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
-    }
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

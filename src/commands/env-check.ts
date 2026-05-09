@@ -1,55 +1,102 @@
-import fs from "fs-extra";
-import path from "node:path";
-import { MCP_REGISTRY } from "../constants";
-import { detectVsCodePath } from "../core/detector";
-import { readMcpJson } from "../core/writer";
-import { log, printTable } from "../utils/logger";
+import chalk from 'chalk';
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson } from '../core/writer.js';
+import { getMcpById } from '../core/registry.js';
+import { isEnvVarSet, printEnvProfileInstructions } from '../core/credentials.js';
+import { log, printTable } from '../utils/logger.js';
+
+//
+// mcp-kit env check
+//
 
 interface EnvCheckOptions {
   json?: boolean;
 }
 
+interface EnvVarResult {
+  mcp: string;
+  key: string;
+  required: boolean;
+  set: boolean;
+  secret: boolean;
+}
+
 export async function runEnvCheck(options: EnvCheckOptions = {}): Promise<void> {
   try {
-    const detected = await detectVsCodePath();
-    const config = await readMcpJson(detected.mcpJsonPath);
-    const envPath = path.join(process.cwd(), ".env");
-    const envContent = (await fs.pathExists(envPath)) ? await fs.readFile(envPath, "utf8") : "";
+    const vscodePaths = await detectVsCodePath();
+    const config = await readMcpJson(vscodePaths.mcpJsonPath);
+    const serverIds = Object.keys(config.servers);
 
-    const rows: string[][] = [];
-    for (const [id, server] of Object.entries(config.servers)) {
-      const mcp = MCP_REGISTRY.find((item) => item.id === id);
-      if (!mcp) {
-        continue;
-      }
+    if (serverIds.length === 0) {
+      log.warn('No MCP servers configured. Run "mcp-kit init dev" first.');
+      return;
+    }
 
-      for (const envVar of mcp.envVars) {
-        const configured = server.env?.[envVar.key] || "";
-        const isRef = configured.startsWith("${env:");
-        const hasEnv = envContent.includes(`${envVar.key}=`);
-        const status = configured.length === 0
-          ? (envVar.required ? "Missing" : "Optional")
-          : isRef
-            ? (hasEnv ? "OK (.env)" : "Ref missing")
-            : "Inline";
+    const results: EnvVarResult[] = [];
 
-        rows.push([id, envVar.key, envVar.required ? "Yes" : "No", status]);
+    for (const id of serverIds) {
+      const def = getMcpById(id);
+      if (!def || def.envVars.length === 0) continue;
+      for (const envVar of def.envVars) {
+        results.push({
+          mcp: id,
+          key: envVar.key,
+          required: envVar.required,
+          set: isEnvVarSet(envVar.key),
+          secret: envVar.secret,
+        });
       }
     }
 
     if (options.json) {
-      console.log(JSON.stringify(rows, null, 2));
+      console.log(JSON.stringify(results, null, 2));
       return;
     }
 
-    printTable(["MCP", "Env Key", "Required", "Status"], rows);
-    process.exit(0);
-  } catch (err) {
-    log.error(`env-check failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-    log.muted("Suggestion: run `mcp-kit init --dev` to repair env mappings.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
+    if (results.length === 0) {
+      log.success('All configured MCPs require no environment variables.');
+      return;
     }
+
+    log.header('Environment Variable Check');
+
+    const missing = results.filter(r => !r.set && r.required);
+    const optional = results.filter(r => !r.set && !r.required);
+    const present = results.filter(r => r.set);
+
+    const rows = results.map(r => [
+      r.mcp,
+      r.key,
+      r.required ? chalk.red('required') : chalk.gray('optional'),
+      r.set
+        ? chalk.green('✅ set')
+        : r.required
+        ? chalk.red('❌ missing')
+        : chalk.yellow('⚠ not set'),
+    ]);
+
+    printTable(['MCP', 'Variable', 'Required', 'Status'], rows);
+
+    log.blank();
+    log.muted(`${present.length} set  ${optional.length} optional not set`);
+
+    if (missing.length > 0) {
+      log.blank();
+      log.warn(`${missing.length} required variable(s) are not set:\n`);
+      for (const r of missing) {
+        printEnvProfileInstructions(r.key);
+      }
+      log.blank();
+      process.exit(1);
+    }
+
+    log.blank();
+    log.success('All required environment variables are set.');
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`env check failed: ${message}`);
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

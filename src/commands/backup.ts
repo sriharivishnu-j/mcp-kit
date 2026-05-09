@@ -1,7 +1,12 @@
-import fs from "fs-extra";
-import path from "node:path";
-import { detectVsCodePath } from "../core/detector";
-import { log } from "../utils/logger";
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import { detectVsCodePath } from '../core/detector.js';
+import { log } from '../utils/logger.js';
+import { fileExists } from '../utils/fs.js';
+
+//
+// mcp-kit backup
+//
 
 interface BackupOptions {
   output?: string;
@@ -9,26 +14,38 @@ interface BackupOptions {
 
 export async function runBackup(options: BackupOptions = {}): Promise<void> {
   try {
-    const detected = await detectVsCodePath();
-    if (!(await fs.pathExists(detected.mcpJsonPath))) {
-      log.warn("No mcp.json file found to backup.");
-      process.exit(0);
+    const vscodePaths = await detectVsCodePath();
+    const mcpJsonPath = vscodePaths.mcpJsonPath;
+
+    if (!(await fileExists(mcpJsonPath))) {
+      log.error('No mcp.json found. Nothing to back up.');
+      log.info('Run "mcp-kit init dev" to create a config first.');
+      process.exit(1);
     }
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const backupPath = options.output
-      ? path.resolve(options.output)
-      : path.join(path.dirname(detected.mcpJsonPath), `mcp-backup-${stamp}.json`);
-    await fs.mkdirp(path.dirname(backupPath));
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, '-')
+      .replace('T', '_')
+      .slice(0, 19); // YYYY-MM-DD_HH-MM-SS
 
-    await fs.copyFile(detected.mcpJsonPath, backupPath);
-    log.success(`Backup created at ${backupPath}`);
-    process.exit(0);
+    const destPath =
+      options.output ??
+      path.join(
+        path.dirname(mcpJsonPath),
+        `mcp.backup.${timestamp}.json`
+      );
+
+    const content = await fs.readFile(mcpJsonPath, 'utf-8');
+    await fs.writeFile(destPath, content, 'utf-8');
+
+    log.success(`Backup saved: ${destPath}`);
+    log.muted(`Source: ${mcpJsonPath}`);
+
   } catch (err) {
-    log.error(`backup failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
-    }
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`Backup failed: ${message}`);
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

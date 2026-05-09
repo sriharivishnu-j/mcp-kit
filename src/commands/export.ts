@@ -1,55 +1,83 @@
-import fs from "fs-extra";
-import { MCP_KIT_META_PATH } from "../constants";
-import { detectVsCodePath } from "../core/detector";
-import { readMcpJson } from "../core/writer";
-import { log } from "../utils/logger";
+import path from 'node:path';
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson } from '../core/writer.js';
+import { log } from '../utils/logger.js';
+import { safeReadJSON, safeWriteJSON } from '../utils/fs.js';
+import { MCP_KIT_META_PATH } from '../constants.js';
+import type { McpKitMeta, McpKitExport, McpServerEntry } from '../types.js';
+import { createRequire } from 'node:module';
 
-export async function runExport(options: { output: string; redact: boolean }): Promise<void> {
+const _require = createRequire(import.meta.url);
+const pkg = _require('../../package.json') as { version: string };
+
+//
+// mcp-kit export
+//
+
+interface ExportOptions {
+  output?: string;
+  redact?: boolean; // true = redact secrets (default); false = include real values
+}
+
+export async function runExport(options: ExportOptions): Promise<void> {
   try {
-    const detected = await detectVsCodePath();
-    const config = await readMcpJson(detected.mcpJsonPath);
-    const meta = (await fs.pathExists(MCP_KIT_META_PATH)) ? await fs.readJSON(MCP_KIT_META_PATH) : {};
+    const outputFile = options.output ?? 'mcp-kit-export.json';
+    const shouldRedact = options.redact !== false; // default true
 
-    const servers = JSON.parse(JSON.stringify(config.servers)) as typeof config.servers;
+    const vscodePaths = await detectVsCodePath();
+    const config = await readMcpJson(vscodePaths.mcpJsonPath);
+    const meta = await safeReadJSON<McpKitMeta>(MCP_KIT_META_PATH);
 
-    if (options.redact) {
-      for (const server of Object.values(servers)) {
-        if (server.env) {
-          for (const key of Object.keys(server.env)) {
-            if (!server.env[key].startsWith("${env:")) {
-              server.env[key] = "REDACTED";
-            }
-          }
+    if (Object.keys(config.servers).length === 0) {
+      log.warn('No MCP servers configured. Nothing to export.');
+      return;
+    }
+
+    // Build sanitised server entries
+    const servers: Record<string, McpServerEntry> = {};
+
+    for (const [id, entry] of Object.entries(config.servers)) {
+      if (shouldRedact) {
+        const redactedEnv: Record<string, string> = {};
+        for (const [k, v] of Object.entries(entry.env ?? {})) {
+          // Redact if value looks like a real secret (not a ${env:KEY} ref)
+          redactedEnv[k] = v.startsWith('${env:') ? v : 'REDACTED';
         }
+        servers[id] = {
+          ...entry,
+          env: Object.keys(redactedEnv).length ? redactedEnv : undefined,
+        };
+      } else {
+        servers[id] = { ...entry };
       }
     }
 
-    const exportObject = {
+    const exportData: McpKitExport = {
       exportedAt: new Date().toISOString(),
-      mcpKitVersion: meta.mcpKitVersion || require("../../package.json").version,
-      profileMode: meta.profileMode || "dev",
+      mcpKitVersion: pkg.version,
+      profileMode: meta?.profileMode ?? 'dev',
       servers,
-      mcpIds: Object.keys(config.servers),
-      instructions: "Run `mcp-kit import <this-file>` to apply"
+      mcpIds: Object.keys(servers),
+      instructions: 'Run "mcp-kit import <this-file>" to apply this configuration',
     };
 
-    await fs.writeJSON(options.output || "mcp-kit-export.json", exportObject, { spaces: 2 });
+    const outputPath = path.resolve(outputFile);
+    await safeWriteJSON(outputPath, exportData);
 
-    log.success(`Exported to ${options.output || "mcp-kit-export.json"}`);
-    log.info("Share this file with teammates who need the same MCP setup");
+    log.blank();
+    log.success(`Exported to: ${outputPath}`);
+    log.info('Share this file with teammates who need the same MCP setup.');
+    log.info(`They can apply it with: mcp-kit import ${path.basename(outputPath)}`);
 
-    if (!options.redact) {
-      log.warn("⚠️ Contains real credentials — do not commit");
+    if (!shouldRedact) {
+      log.blank();
+      log.warn('⚠ This export contains real credential values - do NOT commit to source control!');
     }
 
-    process.exit(0);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const message = err instanceof Error ? err.message : String(err);
     log.error(`Export failed: ${message}`);
-    log.muted("Suggestion: verify output path is writable.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
-    }
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

@@ -1,93 +1,156 @@
-import fs from "fs-extra";
-import inquirer from "inquirer";
-import { MCP_KIT_META_PATH } from "../constants";
-import { detectVsCodePath } from "../core/detector";
-import { buildEnvRefValue, storeCredential } from "../core/credentials";
-import { getMcpById } from "../core/registry";
-import { addServerToMcpJson, readMcpJson } from "../core/writer";
-import { askCredentialStorage } from "../prompts/shared-prompts";
-import { log } from "../utils/logger";
+import inquirer from 'inquirer';
+import chalk from 'chalk';
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson, addServerToMcpJson } from '../core/writer.js';
+import { getMcpById } from '../core/registry.js';
+import { storeCredential, buildEnvRefValue, getEnvFilePath } from '../core/credentials.js';
+import { askCredentialStorage } from '../prompts/shared-prompts.js';
+import { log } from '../utils/logger.js';
+import { safeReadJSON, safeWriteJSON, ensureDir } from '../utils/fs.js';
+import { MCP_REGISTRY, MCP_KIT_META_PATH, MCP_KIT_DIR } from '../constants.js';
+import type { McpDefinition, McpServerEntry, CredentialStorage, McpKitMeta } from '../types.js';
+import { createRequire } from 'node:module';
+
+const _require = createRequire(import.meta.url);
+const pkg = _require('../../package.json') as { version: string };
+
+//
+// mcp-kit add <mcp-id>
+//
+
+function buildArgs(mcp: McpDefinition, answers: Record<string, string>): string[] {
+  return mcp.args.map(arg =>
+    arg.replace(/\$\{([^}]+)\}/g, (_, key: string) => answers[key] ?? '')
+  );
+}
+
+function buildCommand(mcp: McpDefinition, answers: Record<string, string>): string {
+  return mcp.command.replace(/\$\{([^}]+)\}/g, (_, key: string) => answers[key] ?? mcp.command);
+}
+
+function getArgEmbeddedKeys(mcp: McpDefinition): Set<string> {
+  const keys = new Set<string>();
+  const allText = [...mcp.args, mcp.command].join('');
+  const matches = allText.matchAll(/\$\{([^}]+)\}/g);
+  for (const match of matches) {
+    keys.add(match[1]);
+  }
+  return keys;
+}
+
+function buildEnvRecord(
+  mcp: McpDefinition,
+  answers: Record<string, string>,
+  storage: CredentialStorage
+): Record<string, string> {
+  const argEmbedded = getArgEmbeddedKeys(mcp);
+  const env: Record<string, string> = {};
+  for (const envVar of mcp.envVars) {
+    if (argEmbedded.has(envVar.key)) continue;
+    const value = answers[envVar.key] ?? '';
+    if (!value && !envVar.required) continue;
+    env[envVar.key] = buildEnvRefValue(envVar.key, storage, value);
+  }
+  return env;
+}
 
 export async function runAdd(mcpId: string): Promise<void> {
   try {
-    const mcp = getMcpById(mcpId);
-    if (!mcp) {
-      log.error(`Unknown MCP: ${mcpId}`);
-      log.info("Run `mcp-kit list --available` to see valid MCP IDs.");
+    if (!mcpId) {
+      log.error('Please specify an MCP ID: mcp-kit add <mcp-id>');
+      log.info('Run "mcp-kit list" to see all available MCPs.');
       process.exit(1);
     }
 
-    const detected = await detectVsCodePath();
-    const config = await readMcpJson(detected.mcpJsonPath);
+    const mcp = getMcpById(mcpId);
+    if (!mcp) {
+      log.error(`Unknown MCP: "${mcpId}"`);
+      log.blank();
+      log.info('Available MCP IDs:');
+      MCP_REGISTRY.forEach(m => log.muted(`  ${m.id.padEnd(16)} ${m.name}`));
+      process.exit(1);
+    }
+
+    const vscodePaths = await detectVsCodePath();
+    const config = await readMcpJson(vscodePaths.mcpJsonPath);
+
     if (config.servers[mcpId]) {
-      log.warn(`MCP ${mcpId} is already configured. Reconfiguring...`);
+      log.warn(`${mcp.name} is already configured. Continuing will overwrite it.`);
     }
 
     const storage = await askCredentialStorage();
+    const envFilePath = getEnvFilePath(vscodePaths.vscodeFolderPath);
+
+    // Collect answers for this MCP
     const answers: Record<string, string> = {};
 
-    for (const envVar of mcp.envVars) {
-      const response = await inquirer.prompt<{ value: string }>([
-        {
-          type: envVar.secret ? "password" : "input",
-          name: "value",
-          message: `${envVar.label}${envVar.required ? " *" : " (optional)"}`,
-          mask: envVar.secret ? "*" : undefined,
-          validate: (input: string) => !envVar.required || input.length > 0 || "This field is required"
-        }
-      ]);
-      answers[envVar.key] = response.value;
+    if (mcp.envVars.length > 0) {
+      console.log('');
+      console.log(chalk.bold.cyan(`Setting up: ${mcp.name}`));
+      console.log(chalk.gray(`${mcp.description}`));
 
-      if (envVar.secret && response.value) {
-        await storeCredential(envVar.key, response.value, storage);
-      }
-    }
-
-    const args = mcp.id === "filesystem" && answers.FILESYSTEM_ALLOWED_PATH
-      ? [...mcp.args, answers.FILESYSTEM_ALLOWED_PATH]
-      : [...mcp.args];
-
-    const env: Record<string, string> = {};
-    for (const envVar of mcp.envVars) {
-      const value = answers[envVar.key];
-      if (!value && !envVar.required) {
-        continue;
-      }
-      env[envVar.key] = buildEnvRefValue(envVar.key, storage, value);
-    }
-
-    await addServerToMcpJson(detected.mcpJsonPath, mcp.id, {
-      command: mcp.command,
-      args,
-      env
-    });
-
-    const meta = (await fs.pathExists(MCP_KIT_META_PATH))
-      ? await fs.readJSON(MCP_KIT_META_PATH)
-      : {
-          installedAt: new Date().toISOString(),
-          mcpKitVersion: require("../../package.json").version,
-          installedMcps: []
+      const questions = mcp.envVars.map(envVar => {
+        if (envVar.hint) console.log(chalk.gray(`${envVar.hint}`));
+        return {
+          type: envVar.secret ? 'password' : 'input',
+          name: envVar.key,
+          message: `${envVar.label}${envVar.required ? ' *' : ' (optional)'}`,
+          default: envVar.defaultValue ?? '',
+          validate: (input: string): boolean | string => {
+            if (!envVar.required) return true;
+            if (input.trim().length === 0) return 'This field is required';
+            return true;
+          },
         };
+      });
 
-    meta.lastUpdated = new Date().toISOString();
-    meta.credentialStorage = storage;
-    meta.vscodePath = detected.vscodeFolderPath;
-    meta.installedMcps = Array.from(new Set([...(meta.installedMcps || []), mcp.id]));
-
-    await fs.mkdirp(require("node:path").dirname(MCP_KIT_META_PATH));
-    await fs.writeJSON(MCP_KIT_META_PATH, meta, { spaces: 2 });
-
-    log.success(`Added ${mcp.name} to ${detected.mcpJsonPath}`);
-    log.info("Reload VS Code to activate");
-    process.exit(0);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    log.error(`Add failed: ${message}`);
-    log.muted("Suggestion: run `mcp-kit doctor` after fixing input values.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
+      const raw = await inquirer.prompt<Record<string, string>>(questions);
+      Object.assign(answers, raw);
     }
+
+    const argEmbedded = getArgEmbeddedKeys(mcp);
+
+    // Store secrets
+    for (const envVar of mcp.envVars) {
+      if (argEmbedded.has(envVar.key)) continue;
+      const value = answers[envVar.key];
+      if (value && envVar.secret && storage !== 'inline') {
+        await storeCredential(envVar.key, value, storage, envFilePath);
+      }
+    }
+
+    const entry: McpServerEntry = {
+      type: 'stdio',
+      command: buildCommand(mcp, answers),
+      args: buildArgs(mcp, answers),
+      env: buildEnvRecord(mcp, answers, storage),
+    };
+
+    if (entry.env && Object.keys(entry.env).length === 0) {
+      delete entry.env;
+    }
+
+    await addServerToMcpJson(vscodePaths.mcpJsonPath, mcp.id, entry);
+
+    // Update meta
+    await ensureDir(MCP_KIT_DIR);
+    const existingMeta = await safeReadJSON<McpKitMeta>(MCP_KIT_META_PATH) ?? {};
+    const currentInstalled = (existingMeta as McpKitMeta).installedMcps ?? [];
+    const meta: Partial<McpKitMeta> = {
+      ...(existingMeta as McpKitMeta),
+      lastUpdated: new Date().toISOString(),
+      installedMcps: [...new Set([...currentInstalled, mcpId])],
+      mcpKitVersion: pkg.version,
+    };
+
+    await safeWriteJSON(MCP_KIT_META_PATH, meta);
+    log.success(`Added ${mcp.name} to ${vscodePaths.mcpJsonPath}`);
+    log.info('Reload VS Code to activate: Cmd/Ctrl+Shift+P → "Reload Window"');
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`Add failed: ${message}`);
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

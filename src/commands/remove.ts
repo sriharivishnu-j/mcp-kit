@@ -1,57 +1,87 @@
-import fs from "fs-extra";
-import { MCP_KIT_META_PATH } from "../constants";
-import { deleteCredential } from "../core/credentials";
-import { detectVsCodePath } from "../core/detector";
-import { getMcpById } from "../core/registry";
-import { readMcpJson, removeServerFromMcpJson } from "../core/writer";
-import { askConfirm } from "../prompts/shared-prompts";
-import { CredentialStorage } from "../types";
-import { log } from "../utils/logger";
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson, removeServerFromMcpJson } from '../core/writer.js';
+import { getMcpById } from '../core/registry.js';
+import { deleteCredential, getEnvFilePath } from '../core/credentials.js';
+import { askConfirm } from '../prompts/shared-prompts.js';
+import { log } from '../utils/logger.js';
+import { safeReadJSON, safeWriteJSON, ensureDir } from '../utils/fs.js';
+import { MCP_KIT_META_PATH, MCP_KIT_DIR } from '../constants.js';
+import type { McpKitMeta, CredentialStorage } from '../types.js';
+import { createRequire } from 'node:module';
+
+const _require = createRequire(import.meta.url);
+const pkg = _require('../../package.json') as { version: string };
+
+//
+// mcp-kit remove <mcp-id>
+//
 
 export async function runRemove(mcpId: string): Promise<void> {
   try {
-    const mcp = getMcpById(mcpId);
-    const detected = await detectVsCodePath();
-    const config = await readMcpJson(detected.mcpJsonPath);
-
-    if (!config.servers[mcpId]) {
-      log.error(`MCP ${mcpId} is not configured`);
+    if (!mcpId) {
+      log.error('Please specify an MCP ID: mcp-kit remove <mcp-id>');
       process.exit(1);
     }
 
-    const confirmed = await askConfirm(`Remove ${mcp?.name || mcpId} from mcp.json?`);
-    if (!confirmed) {
-      log.info("Aborted");
-      process.exit(0);
+    const vscodePaths = await detectVsCodePath();
+    const config = await readMcpJson(vscodePaths.mcpJsonPath);
+
+    if (!(mcpId in config.servers)) {
+      log.error(`MCP "${mcpId}" is not currently configured.`);
+      log.info('Run "mcp-kit list" to see configured MCPs.');
+      process.exit(1);
     }
 
-    await removeServerFromMcpJson(detected.mcpJsonPath, mcpId);
+    const mcp = getMcpById(mcpId);
+    const displayName = mcp?.name ?? mcpId;
 
-    const deleteStored = await askConfirm("Also delete stored credentials from keychain/.env?");
-    if (deleteStored && mcp) {
-      const meta = (await fs.pathExists(MCP_KIT_META_PATH)) ? await fs.readJSON(MCP_KIT_META_PATH) : null;
-      const storage = (meta?.credentialStorage || "keychain") as CredentialStorage;
-      for (const envVar of mcp.envVars) {
-        await deleteCredential(envVar.key, storage);
+    const confirmed = await askConfirm(`Remove ${displayName} from mcp.json?`);
+    if (!confirmed) {
+      log.info('Aborted. No changes were made.');
+      return;
+    }
+
+    await removeServerFromMcpJson(vscodePaths.mcpJsonPath, mcpId);
+
+    // Optionally purge credentials
+    const meta = await safeReadJSON<McpKitMeta>(MCP_KIT_META_PATH);
+    const credStorage: CredentialStorage = meta?.credentialStorage ?? 'keychain';
+    const envFilePath = getEnvFilePath(vscodePaths.vscodeFolderPath);
+
+    if (mcp && (credStorage === 'keychain' || credStorage === 'dotenv')) {
+      const deleteCreds = await askConfirm(
+        `Also delete stored credentials for ${displayName} from ${credStorage}?`
+      );
+      if (deleteCreds) {
+        for (const envVar of mcp.envVars) {
+          if (envVar.secret) {
+            await deleteCredential(envVar.key, credStorage, envFilePath);
+          }
+        }
+        log.success(`Credentials deleted from ${credStorage}.`);
       }
     }
 
-    if (await fs.pathExists(MCP_KIT_META_PATH)) {
-      const meta = await fs.readJSON(MCP_KIT_META_PATH);
-      meta.lastUpdated = new Date().toISOString();
-      meta.installedMcps = (meta.installedMcps || []).filter((id: string) => id !== mcpId);
-      await fs.writeJSON(MCP_KIT_META_PATH, meta, { spaces: 2 });
+    // Update meta
+    if (meta) {
+      const updated: McpKitMeta = {
+        ...meta,
+        lastUpdated: new Date().toISOString(),
+        installedMcps: meta.installedMcps.filter(id => id !== mcpId),
+        mcpKitVersion: pkg.version,
+      };
+      await ensureDir(MCP_KIT_DIR);
+      await safeWriteJSON(MCP_KIT_META_PATH, updated);
     }
 
-    log.success(`Removed ${mcp?.name || mcpId}`);
-    process.exit(0);
+    log.blank();
+    log.success(`Removed ${displayName} from your MCP configuration.`);
+    log.info('Reload VS Code to apply: Cmd/Ctrl+Shift+P → "Reload Window"');
+
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+    const message = err instanceof Error ? err.message : String(err);
     log.error(`Remove failed: ${message}`);
-    log.muted("Suggestion: verify mcp.json permissions and try again.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
-    }
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

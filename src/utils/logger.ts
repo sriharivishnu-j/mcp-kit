@@ -13,7 +13,8 @@ export const log = {
     console.log(
       boxen(chalk.bold(msg), {
         padding: 1,
-        borderColor: "cyan"
+        borderColor: "cyan",
+        borderStyle: "round",
       })
     ),
   muted: (msg: string): void => console.log(chalk.gray(msg)),

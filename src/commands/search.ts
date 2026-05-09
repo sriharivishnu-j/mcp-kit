@@ -1,5 +1,13 @@
-import { MCP_REGISTRY } from "../constants";
-import { log, printTable } from "../utils/logger";
+import chalk from 'chalk';
+import { getMcpById } from '../core/registry.js';
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson } from '../core/writer.js';
+import { log, printTable } from '../utils/logger.js';
+import { MCP_REGISTRY } from '../constants.js';
+
+//
+// mcp-kit search <query>
+//
 
 interface SearchOptions {
   json?: boolean;
@@ -7,37 +15,70 @@ interface SearchOptions {
 
 export async function runSearch(query: string, options: SearchOptions = {}): Promise<void> {
   try {
-    const term = query.trim().toLowerCase();
-    if (!term) {
-      log.error("Please provide a search query.");
+    if (!query || query.trim().length === 0) {
+      log.error('Please provide a search query: mcp-kit search <query>');
       process.exit(1);
     }
 
-    const results = MCP_REGISTRY.filter((mcp) =>
-      [mcp.id, mcp.name, mcp.description, mcp.category, mcp.npmPackage].join(" ").toLowerCase().includes(term)
+    const q = query.toLowerCase();
+
+    const matches = MCP_REGISTRY.filter(m =>
+      m.id.toLowerCase().includes(q) ||
+      m.name.toLowerCase().includes(q) ||
+      m.description.toLowerCase().includes(q) ||
+      m.category.toLowerCase().includes(q) ||
+      m.npmPackage.toLowerCase().includes(q) ||
+      m.envVars.some(ev =>
+        ev.key.toLowerCase().includes(q) ||
+        ev.label.toLowerCase().includes(q)
+      )
     );
 
+    // Check which are currently configured
+    let configuredIds: string[] = [];
+    try {
+      const vscodePaths = await detectVsCodePath();
+      const config = await readMcpJson(vscodePaths.mcpJsonPath);
+      configuredIds = Object.keys(config.servers);
+    } catch { /* no config yet */ }
+
     if (options.json) {
-      console.log(JSON.stringify(results, null, 2));
+      console.log(JSON.stringify(matches.map(m => ({
+        id: m.id,
+        name: m.name,
+        description: m.description,
+        category: m.category,
+        npmPackage: m.npmPackage,
+        devOnly: m.devOnly,
+        configured: configuredIds.includes(m.id),
+      })), null, 2));
       return;
     }
 
-    if (results.length === 0) {
-      log.warn(`No MCPs matched "${query}"`);
-      process.exit(0);
+    if (matches.length === 0) {
+      log.warn(`No MCPs found matching "${query}".`);
+      log.info('Run "mcp-kit list --available" to see all MCPs.');
+      return;
     }
 
-    printTable(
-      ["ID", "Name", "Category", "Package", "Description"],
-      results.map((mcp) => [mcp.id, mcp.name, mcp.category, mcp.npmPackage, mcp.description])
-    );
+    log.header(`Search results for "${query}" (${matches.length} match${matches.length === 1 ? '' : 'es'})`);
 
-    process.exit(0);
+    const rows = matches.map(m => [
+      chalk.cyan(m.id),
+      m.name,
+      m.category,
+      configuredIds.includes(m.id) ? chalk.green('✓') : chalk.gray('-'),
+      m.description,
+    ]);
+
+    printTable(['ID', 'Name', 'Category', 'Configured', 'Description'], rows);
+    log.blank();
+    log.info('Add one: "mcp-kit add <id>" | Details: "mcp-kit info <id>"');
+
   } catch (err) {
-    log.error(`search failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
-    }
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`search failed: ${message}`);
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }

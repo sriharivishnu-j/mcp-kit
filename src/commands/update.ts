@@ -1,86 +1,131 @@
-import { detectVsCodePath } from "../core/detector";
-import { getLatestVersion, getMcpById } from "../core/registry";
-import { readMcpJson, writeMcpJson } from "../core/writer";
-import { askConfirm } from "../prompts/shared-prompts";
-import { log, printTable } from "../utils/logger";
-import { startSpinner, succeedSpinner, failSpinner } from "../utils/spinner";
+import { detectVsCodePath } from '../core/detector.js';
+import { readMcpJson, writeMcpJson } from '../core/writer.js';
+import { getMcpById, getLatestVersion } from '../core/registry.js';
+import { askConfirm } from '../prompts/shared-prompts.js';
+import { log, printTable } from '../utils/logger.js';
+import { startSpinner, succeedSpinner, failSpinner } from '../utils/spinner.js';
+import { safeWriteJSON, ensureDir, safeReadJSON } from '../utils/fs.js';
+import { MCP_KIT_META_PATH, MCP_KIT_DIR } from '../constants.js';
+import type { McpKitMeta } from '../types.js';
+import { createRequire } from 'node:module';
 
-function parseVersionFromArgs(args: string[], npmPackage: string): string {
-  const joined = args.join(" ");
-  const match = joined.match(new RegExp(`${npmPackage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}@([^\s]+)`));
-  return match?.[1] || "latest";
+const _require = createRequire(import.meta.url);
+const pkg = _require('../../package.json') as { version: string };
+
+//
+// mcp-kit update
+//
+
+/** Extract a pinned version from an arg like "@azure/mcp@1.2.0" */
+function extractVersionFromArg(arg: string): string | null {
+  const match = arg.match(/@(\d+\.\d+\.\d+(?:-[\w.]+)?)$/);
+  return match ? match[1] : null;
+}
+
+interface UpdateResult {
+  id: string;
+  def?: { name: string; npmPackage: string; args: string[] };
+  current: string;
+  latest: string;
+  needsUpdate: boolean;
 }
 
 export async function runUpdate(): Promise<void> {
   try {
-    const detected = await detectVsCodePath();
-    const config = await readMcpJson(detected.mcpJsonPath);
+    const vscodePaths = await detectVsCodePath();
+    const config = await readMcpJson(vscodePaths.mcpJsonPath);
+    const serverIds = Object.keys(config.servers);
 
-    const outdated: string[] = [];
-    const rows: string[][] = [];
-
-    for (const [id, server] of Object.entries(config.servers)) {
-      const mcp = getMcpById(id);
-      if (!mcp) {
-        rows.push([id, "unknown", "unknown", "⚠ Not in registry"]);
-        continue;
-      }
-
-      const current = parseVersionFromArgs(server.args, mcp.npmPackage);
-      const latest = await getLatestVersion(mcp.npmPackage);
-      const needsUpdate = current !== "latest" && latest !== "unknown" && current !== latest;
-
-      rows.push([mcp.name, current, latest, needsUpdate ? "⬆ Update available" : "✅ Up to date"]);
-      if (needsUpdate) {
-        outdated.push(id);
-      }
+    if (serverIds.length === 0) {
+      log.warn('No MCP servers are configured. Nothing to update.');
+      return;
     }
 
-    printTable(["MCP", "Current", "Latest", "Action"], rows);
+    log.header('mcp-kit - Check for Updates');
+
+    // Check latest versions in parallel
+    const results: UpdateResult[] = await Promise.all(
+      serverIds.map(async id => {
+        const def = getMcpById(id);
+        if (!def) return { id, current: 'unknown', latest: 'n/a', needsUpdate: false };
+
+        const latest = await getLatestVersion(def.npmPackage);
+        const entry = config.servers[id];
+        const pinned = entry?.args?.map(extractVersionFromArg).find(Boolean);
+        const current = pinned ?? 'latest';
+        const needsUpdate =
+          current !== 'latest' &&
+          latest !== 'unknown' &&
+          latest !== 'n/a' &&
+          current !== latest;
+
+        return { id, def, current, latest, needsUpdate };
+      })
+    );
+
+    const rows = results.map(r => [
+      r.id,
+      r.def?.name ?? r.id,
+      r.current,
+      r.latest,
+      r.needsUpdate ? '↑ Update available' : '✓ Up to date',
+    ]);
+
+    printTable(['ID', 'Name', 'Current', 'Latest', 'Action'], rows);
+
+    const outdated = results.filter(r => r.needsUpdate);
 
     if (outdated.length === 0) {
-      log.success("All configured MCPs are up to date.");
-      process.exit(0);
+      log.success('All configured MCPs are up to date!');
+      return;
     }
 
-    const confirm = await askConfirm("Update all outdated MCPs?");
-    if (!confirm) {
-      log.info("No updates were applied.");
-      process.exit(0);
+    const doUpdate = await askConfirm(`Update ${outdated.length} outdated MCP(s) to @latest?`);
+    if (!doUpdate) {
+      log.info('No changes made.');
+      return;
     }
 
-    let updated = 0;
-    for (const id of outdated) {
-      const mcp = getMcpById(id);
-      if (!mcp) {
-        continue;
-      }
-
-      const spinner = startSpinner(`Updating ${mcp.name}`);
+    for (const item of outdated) {
+      if (!item.def) continue;
+      const spinner = startSpinner(`Updating ${item.def.name}...`);
       try {
-        config.servers[id].args = mcp.args.map((arg) => {
-          if (arg.includes(mcp.npmPackage)) {
-            return `${mcp.npmPackage}@latest`;
-          }
-          return arg;
-        });
-        succeedSpinner(spinner, `Updated ${mcp.name}`);
-        updated += 1;
+        const entry = config.servers[item.id];
+        if (entry) {
+          // Replace pinned version tags in args with @latest
+          entry.args = entry.args.map(arg =>
+            arg.replace(/@\d+\.\d+\.\d+(?:-[\w.]+)?$/, '@latest')
+          );
+          config.servers[item.id] = entry;
+        }
+        succeedSpinner(spinner, `Updated ${item.def.name} to @latest`);
       } catch (err) {
-        failSpinner(spinner, `Failed ${mcp.name}: ${err instanceof Error ? err.message : "Unknown error"}`);
+        const message = err instanceof Error ? err.message : String(err);
+        failSpinner(spinner, `Failed to update ${item.def.name}: ${message}`);
       }
     }
 
-    await writeMcpJson(detected.mcpJsonPath, config);
-    log.success(`Updated ${updated} MCPs. Reload VS Code to apply.`);
-    process.exit(0);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    log.error(`Update failed: ${message}`);
-    log.muted("Suggestion: run `mcp-kit status` to inspect versions manually.");
-    if (process.env.DEBUG && err instanceof Error) {
-      console.error(err.stack);
+    await writeMcpJson(vscodePaths.mcpJsonPath, config);
+
+    // Update meta
+    await ensureDir(MCP_KIT_DIR);
+    const meta = await safeReadJSON<McpKitMeta>(MCP_KIT_META_PATH);
+    if (meta) {
+      await safeWriteJSON(MCP_KIT_META_PATH, {
+        ...meta,
+        lastUpdated: new Date().toISOString(),
+        mcpKitVersion: pkg.version,
+      });
     }
+
+    log.blank();
+    log.success(`Updated ${outdated.length} MCP(s). Reload VS Code to apply.`);
+    log.info('Cmd/Ctrl+Shift+P → "Reload Window"');
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(`Update failed: ${message}`);
+    if (process.env['DEBUG']) console.error(err);
     process.exit(1);
   }
 }
